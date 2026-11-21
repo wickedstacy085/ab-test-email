@@ -1,0 +1,35 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - index.qmd
+
+execute:
+  freeze: false        # данные лежат в репозитории, CI пересчитывает всё сам
+
+website:
+  title: "A/B-тест email-рассылки"
+  site-url: "https://wickedstacy085.github.io/ab-test-email"
+  repo-url: "https://github.com/wickedstacy085/ab-test-email"
+  open-graph: true
+  navbar:
+    left:
+      - href: "https://wickedstacy085.github.io/analytics/"
+        text: "← Все проекты"
+    right:
+      - icon: github
+        href: "https://github.com/wickedstacy085/ab-test-email"
+        aria-label: GitHub
+  page-footer:
+    left: "Анастасия Смирнова, 2026"
+    right: "[Код проекта](https://github.com/wickedstacy085/ab-test-email)"
+
+format:
+  html:
+    theme:
+      light: [flatly, assets/custom.scss]
+      dark: [darkly, assets/custom.scss]
+    toc: true
+    code-fold: true
+    code-copy: true
+    lang: ru

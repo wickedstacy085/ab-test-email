@@ -1,0 +1,193 @@
+---
+title: "A/B-тест email-рассылки: какое письмо отправлять и кому"
+description: "Анализ рандомизированного эксперимента на 64 000 клиентах интернет-магазина: дизайн теста, проверка SRM, эффект на визиты, покупки и выручку, бутстрап, CUPED, сегменты и рекомендация в деньгах."
+author: Анастасия Смирнова
+date: 2026-11-21
+execute:
+  echo: true
+  warning: false
+---
+
+```{python}
+#| label: setup
+#| include: false
+import sys
+sys.path.insert(0, "src")
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import abtest as ab
+
+plt.rcParams.update({"figure.dpi": 110, "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": True, "grid.alpha": .3, "font.size": 10})
+
+df = ab.load("data/hillstrom.csv")
+counts = df["group"].value_counts().to_dict()
+srm_chi2, srm_p = ab.srm_test(counts, {g: 1 / 3 for g in counts})
+n_ctrl = counts["control"]
+base = df[df.group == "control"]
+mde_visit = ab.mde_proportion(base.visit.mean(), n_ctrl)
+mde_conv = ab.mde_proportion(base.conversion.mean(), n_ctrl)
+
+res = {}
+for t in ["mens", "womens"]:
+    res[t, "visit"] = ab.compare_proportion(df, "visit", t)
+    res[t, "conversion"] = ab.compare_proportion(df, "conversion", t)
+    res[t, "spend"] = ab.compare_mean(df, "spend", t)
+p_adj = ab.holm({f"{t}:{m}": r["p_value"] for (t, m), r in res.items()})
+
+x_m = df.loc[df.group == "mens", "spend"].to_numpy()
+x_w = df.loc[df.group == "womens", "spend"].to_numpy()
+y_c = base["spend"].to_numpy()
+boot_m = ab.bootstrap_diff(x_m, y_c)
+boot_w = ab.bootstrap_diff(x_w, y_c)
+
+df["spend_cuped"] = ab.cuped(df, "spend", "history")
+var_cut = 1 - df["spend_cuped"].var() / df["spend"].var()
+rho = df[["spend", "history"]].corr().iloc[0, 1]
+
+df["buys"] = np.select([(df.mens == 1) & (df.womens == 1), df.mens == 1, df.womens == 1],
+                       ["мужское и женское", "только мужское", "только женское"], "—")
+seg = {t: ab.effect_by_segment(df, "spend", t, "buys") for t in ["mens", "womens"]}
+
+def fmt(x, d=2):
+    return f"{x:,.{d}f}".replace(",", " ").replace(".", ",").replace("-", "−")
+
+def pct(x, d=0):
+    return fmt(100 * x, d) + "%"
+
+def pval(p):
+    return "< 0,001" if p < 0.001 else fmt(p, 3)
+
+m_sp = res["mens", "spend"]; w_sp = res["womens", "spend"]
+per100k = 100_000 * m_sp["lift_abs"]
+per100k_lo, per100k_hi = 100_000 * boot_m[1], 100_000 * boot_m[2]
+w_only_m = seg["womens"].loc["только мужское"]
+```
+
+::: {.result-box}
+**Вопрос.** Интернет-магазин разослал два варианта письма — с мужскими и с женскими товарами — и оставил
+треть клиентов без письма. Стоит ли рассылка денег, какую версию отправлять и кому?
+
+**Ответ.** Отправлять **мужскую версию всем**. За две недели она добавляет
+**$`{python} fmt(m_sp["lift_abs"])`** выручки на клиента (ДИ 95%: `{python} fmt(boot_m[1])`–`{python} fmt(boot_m[2])`,
++`{python} pct(m_sp["lift_rel"])` к контролю) — это ≈ **$`{python} fmt(per100k / 1000, 0)` тыс. на 100 тыс. писем**.
+Женская версия даёт меньше ($`{python} fmt(w_sp["lift_abs"])`) и не работает на клиентах, которые покупают
+только мужские товары, а мужская работает во всех сегментах.
+:::
+
+## Данные и дизайн
+
+Открытый датасет [MineThatData](https://github.com/wickedstacy085/ab-test-email/blob/main/data/README.md) (Kevin Hillstrom, 2008): 64 000 клиентов, покупавших в
+последние 12 месяцев, случайно разделены на три равные группы. Отклик — визит на сайт, покупка и сумма покупки
+за две недели после письма.
+
+| Группа | Клиентов | Визиты | Покупки | Выручка на клиента, $ |
+|---|---:|---:|---:|---:|
+| Без письма (контроль) | `{python} fmt(counts["control"], 0)` | `{python} pct(base.visit.mean(), 1)` | `{python} pct(base.conversion.mean(), 2)` | `{python} fmt(base.spend.mean())` |
+| Мужская версия | `{python} fmt(counts["mens"], 0)` | `{python} pct(df[df.group=="mens"].visit.mean(), 1)` | `{python} pct(df[df.group=="mens"].conversion.mean(), 2)` | `{python} fmt(x_m.mean())` |
+| Женская версия | `{python} fmt(counts["womens"], 0)` | `{python} pct(df[df.group=="womens"].visit.mean(), 1)` | `{python} pct(df[df.group=="womens"].conversion.mean(), 2)` | `{python} fmt(x_w.mean())` |
+
+**Проверки до анализа результатов:**
+
+- **Деление на группы честное (SRM).** χ² = `{python} fmt(srm_chi2)`, p = `{python} fmt(srm_p)` — фактическое
+  деление не отличается от задуманного 1 : 1 : 1, рандомизации можно доверять.
+- **Чувствительность теста (MDE).** При `{python} fmt(n_ctrl, 0)` клиентах в группе, α = 5% и мощности 80% тест
+  замечает рост доли визитов от `{python} pct(mde_visit, 2).replace("%", " п.п.")` и доли покупок от
+  `{python} pct(mde_conv, 2).replace("%", " п.п")`. Покупает меньше 1% клиентов, поэтому по конверсии тест
+  на грани чувствительности, а по визитам — с запасом.
+
+## Результаты
+
+Каждая версия сравнивается с контролем по трём метрикам — это шесть проверок, поэтому p-value скорректированы
+поправкой Холма.
+
+```{python}
+#| label: tbl-effects
+#| tbl-cap: "Эффект писем относительно контроля (ДИ 95%, p-value с поправкой Холма)"
+#| echo: false
+names = {"visit": "Визиты, п.п.", "conversion": "Покупки, п.п.", "spend": "Выручка на клиента, $"}
+rows = []
+for (t, m), r in res.items():
+    k = 100 if m != "spend" else 1
+    rows.append({"Версия": "мужская" if t == "mens" else "женская", "Метрика": names[m],
+                 "Эффект": fmt(k * r["lift_abs"]), "ДИ 95%": f"{fmt(k * r['ci_low'])} … {fmt(k * r['ci_high'])}",
+                 "К контролю": "+" + pct(r["lift_rel"]), "p (Холм)": pval(p_adj[f"{t}:{m}"])})
+pd.DataFrame(rows).style.hide(axis="index")
+```
+
+Обе версии значимо лучше, чем отсутствие письма, по всем трём метрикам; мужская — в 1,7–1,8 раза сильнее женской.
+
+```{python}
+#| label: fig-effects
+#| fig-cap: "Прирост выручки на клиента к контролю, $ (точка — оценка, линия — 95% бутстрап-ДИ)"
+fig, ax = plt.subplots(figsize=(7, 1.8))
+for i, (lab, b) in enumerate([("Женская", boot_w), ("Мужская", boot_m)]):
+    ax.plot([b[1], b[2]], [i, i], lw=3, c="#2c7fb8", alpha=.6)
+    ax.plot(b[0], i, "o", c="#2c7fb8")
+ax.axvline(0, c="k", lw=.8)
+ax.set_yticks([0, 1], ["Женская", "Мужская"]); ax.set_ylim(-.6, 1.6)
+plt.tight_layout()
+```
+
+### Выручка: почему бутстрап
+
+Выручку принесли только `{python} pct((df.spend > 0).mean(), 1)` клиентов, остальные — нули. При таком
+распределении t-тест опирается на асимптотику, поэтому интервал перепроверен бутстрапом (10 000 повторов):
+для мужской версии `{python} fmt(boot_m[1])`–`{python} fmt(boot_m[2])` против
+`{python} fmt(m_sp["ci_low"])`–`{python} fmt(m_sp["ci_high"])` по t-тесту. Интервалы совпадают — выборка
+достаточно большая, и вывод от метода не зависит.
+
+### CUPED: когда снижение дисперсии не работает
+
+CUPED уменьшает шум метрики за счёт данных о клиенте до теста. Единственная такая переменная здесь —
+сумма покупок за прошлый год (`history`), но её корреляция с выручкой в тесте всего
+`{python} fmt(rho, 3)`, и дисперсия снизилась лишь на `{python} pct(var_cut, 2)`. Вывод для практики: CUPED
+полезен, когда есть та же метрика за период до теста (выручка за прошлые две недели), а годовая сумма
+покупок для этого не годится.
+
+## Кому какое письмо
+
+```{python}
+#| label: tbl-segments
+#| tbl-cap: "Прирост выручки на клиента по тому, что клиент покупал раньше, $ (p-value с поправкой Холма)"
+#| echo: false
+tab = pd.concat({("мужская" if t == "mens" else "женская"): s for t, s in seg.items()})
+tab = tab.reset_index(names=["Версия", "Покупал раньше"])
+pd.DataFrame({"Версия": tab["Версия"], "Покупал раньше": tab["Покупал раньше"],
+              "Клиентов": tab["n"].map(lambda v: fmt(v, 0)),
+              "Эффект": tab["lift_abs"].map(fmt),
+              "ДИ 95%": [f"{fmt(a)} … {fmt(b)}" for a, b in zip(tab.ci_low, tab.ci_high)],
+              "p (Холм)": tab["p_holm"].map(pval)}).style.hide(axis="index")
+```
+
+Мужская версия поднимает выручку во всех трёх сегментах, сильнее всего — у тех, кто покупал и мужское, и
+женское. Женская версия не даёт значимого эффекта у тех, кто покупал только мужские товары
+(+`{python} fmt(w_only_m["lift_abs"])`, p = `{python} pval(w_only_m["p_holm"])`). Поэтому отдельная
+таргетированная рассылка не нужна: мужская версия не хуже женской ни в одном сегменте.
+
+## Рекомендация
+
+1. **Отправлять мужскую версию всей базе.** Ожидаемый прирост — ≈ $`{python} fmt(per100k / 1000, 0)` тыс. выручки
+   на 100 тыс. писем за две недели (ДИ: $`{python} fmt(per100k_lo / 1000, 0)`–`{python} fmt(per100k_hi / 1000, 0)` тыс.).
+2. **Порог окупаемости.** Стоимость рассылки в данных не указана. Письмо окупается, если его стоимость меньше
+   маржи с $`{python} fmt(m_sp["lift_abs"])` выручки: при марже 30% — меньше $`{python} fmt(0.3 * m_sp["lift_abs"])`
+   на письмо. Для email это выполняется с большим запасом.
+3. **Следующий тест** — на клиентах, покупающих и мужское, и женское: у них самый сильный отклик, но
+   сегмент маленький (`{python} fmt(seg["mens"].loc["мужское и женское", "n"], 0)` клиентов в двух группах), и
+   интервал широкий.
+
+## Ограничения
+
+- Данные 2008 года, один эксперимент, отклик измерен за две недели: долгосрочный эффект (отписки,
+  «выжигание» базы) не виден.
+- В выручке нет возвратов и маржи; порог окупаемости — допущение, а не расчёт.
+- Сегментный анализ — разведочный: тест не планировался под сравнение сегментов, поэтому его выводы стоит
+  подтверждать отдельным экспериментом.
+
+## Код
+
+Функции анализа — в [`src/abtest/`](https://github.com/wickedstacy085/ab-test-email/tree/main/src/abtest),
+тесты — в [`tests/`](https://github.com/wickedstacy085/ab-test-email/tree/main/tests): размер выборки и MDE
+сверены со statsmodels, бутстрап — с t-интервалом, CUPED и поправка Холма — на синтетических данных.
+Как воспроизвести — в [README](https://github.com/wickedstacy085/ab-test-email#readme).
